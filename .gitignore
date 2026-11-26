@@ -1,0 +1,25 @@
+# data and large files stay in Google Drive, not in git
+data/
+*.nii
+*.nii.gz
+*.tar.gz
+*.npy
+*.npz
+*.pt
+*.pth
+*.csv
+
+# python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# notebooks / editors
+.ipynb_checkpoints/
+.DS_Store
+.env
+
+# local sample data and figures
+sample_data/
+Claude outputs/

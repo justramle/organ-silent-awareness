@@ -1,0 +1,3 @@
+# Paths and settings for training and evaluation.
+# One file for the local sample run and the Colab run; only the paths change.
+# Filled in step by step, starting with dataset.py.
