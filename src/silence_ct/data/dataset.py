@@ -302,17 +302,30 @@ if __name__ == "__main__":
     # check on local sample: 
     # PYTHONPATH=src python -m silence_ct.data.dataset
     
-    dataset = SilenceDataset("sample_data", "valid")
-    print(len(dataset), "scans")
-    print("regions:", dataset.regions)
+    root = "/content/drive/MyDrive/silence_ct"
+    if not Path(root).exists():
+        root = "data"
 
-    item = dataset[0]
-    print("\nscan:", item["scan"])
-    for key, value in item.items():
-        if key != "scan":
-            print(key, tuple(value.shape))
+    for split in ["train", "valid"]:
+        if not Path(f"{root}/geometry/{split}").exists():
+            print(split, "not found, skip")
+            continue
 
-    print("\nstate:    ", item["state"].tolist())
-    print("has_image:", item["has_image"].tolist())
-    print("has_text: ", item["has_text"].tolist())
-    print("is_hidden:", item["is_hidden"].tolist())
+        dataset = SilenceDataset(root, split)
+        print(f"\n{split}: {len(dataset)} scans")
+
+        item = dataset[0]
+        print("scan:", item["scan"])
+        for key, value in item.items():
+            if key != "scan":
+                print(f"  {key:10s} {tuple(value.shape)}")
+
+        # NaN check on the first 200 scans
+        nan_count = 0
+        for index in range(min(200, len(dataset))):
+            item = dataset[index]
+            for key in ["image", "text", "distance"]:
+                if torch.isnan(item[key]).any():
+                    nan_count += 1
+                    break
+        print("  scans with NaN (first 200):", nan_count)
