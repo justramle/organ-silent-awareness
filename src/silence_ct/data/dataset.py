@@ -118,7 +118,7 @@ def load_text(root, split, regions):
       - leave SILENT regions as zeros (their vector comes from an empty sentence)
 
     Args:
-        root: data folder (sample_data locally, silence_ct on Colab)
+        root: data folder (data/ locally, silence_ct on Drive)
         split: "valid" or "train"
         regions: list of the 9 region names, in the order the model uses
 
@@ -197,7 +197,7 @@ class SilenceDataset(Dataset):
     SILENT regions are never hidden: they have no true text, so there is no answer.
 
     Args:
-        root: data folder (sample_data locally, silence_ct on Colab)
+        root: data folder (data/ locally, silence_ct on Drive)
         split: "valid" or "train"
         hide_prob: chance that each written region is hidden
         seed: random seed, so the hidden regions can be repeated
@@ -217,6 +217,14 @@ class SilenceDataset(Dataset):
         organ_scans = {Path(f).stem for f in glob.glob(f"{root}/organ_vectors/{split}/*.npy")}
         geo_scans = {Path(f).stem for f in glob.glob(f"{root}/geometry/{split}/*.npz")}
         self.scans = sorted(organ_scans & geo_scans & set(self.text))
+
+        # load everything once, so __getitem__ does not read from Drive
+        self.image = {}
+        self.geometry = {}
+        for scan in self.scans:
+            organ_vectors = np.load(f"{root}/organ_vectors/{split}/{scan}.npy").astype(np.float32)
+            self.image[scan] = organs_to_regions(organ_vectors, self.regions)
+            self.geometry[scan] = load_geometry(f"{root}/geometry/{split}/{scan}.npz", self.regions)
 
     def __len__(self):
         return len(self.scans)
@@ -267,8 +275,7 @@ class SilenceDataset(Dataset):
 
         scan = self.scans[idx]
 
-        organ_vectors = np.load(f"{self.root}/organ_vectors/{self.split}/{scan}.npy").astype(np.float32)
-        image, has_image = organs_to_regions(organ_vectors, self.regions)
+        image, has_image = self.image[scan]
 
         text, state = self.text[scan]
         is_hidden = self.choose_hidden(state)
@@ -282,7 +289,7 @@ class SilenceDataset(Dataset):
         visible_text[is_hidden] = 0
         has_text = (state != STATE_IDS["SILENT"]) & ~is_hidden
 
-        distance, touching = load_geometry(f"{self.root}/geometry/{self.split}/{scan}.npz", self.regions)
+        distance, touching = self.geometry[scan]
 
         return {
             "scan": scan,
@@ -299,7 +306,7 @@ class SilenceDataset(Dataset):
 
 
 if __name__ == "__main__":
-    # check on local sample: 
+    # quick check (Colab: Drive, Mac: data/)
     # PYTHONPATH=src python -m silence_ct.data.dataset
     
     root = "/content/drive/MyDrive/silence_ct"
