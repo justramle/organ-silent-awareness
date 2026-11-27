@@ -62,16 +62,16 @@ def draw_panel(ax, epochs, train_values, val_values, best_epoch, title, ylabel):
 
     # names at the end of each line
     last_epoch = epochs.iloc[-1]
-    ax.annotate("train", (last_epoch, train_values.iloc[-1]), xytext=(6, 0),
-                textcoords="offset points", va="center", color=MUTED_COLOR)
-    ax.annotate("validation", (last_epoch, val_values.iloc[-1]), xytext=(6, 0),
-                textcoords="offset points", va="center", color=MUTED_COLOR)
+    # ax.annotate("train", (last_epoch, train_values.iloc[-1]), xytext=(6, 0),
+    #             textcoords="offset points", va="center", color=MUTED_COLOR)
+    # ax.annotate("validation", (last_epoch, val_values.iloc[-1]), xytext=(6, 0),
+    #             textcoords="offset points", va="center", color=MUTED_COLOR)
 
     # best epoch: dot with a white ring, value written beside it
     best_value = val_values[epochs == best_epoch].iloc[0]
     ax.scatter([best_epoch], [best_value], s=60, color=VAL_COLOR,
                edgecolor="white", linewidth=2, zorder=3)
-    ax.annotate(f"best {best_value:.3f}\n(epoch {best_epoch})", (best_epoch, best_value),
+    ax.annotate(f"best {best_value:.3f}", (best_epoch, best_value),
                 xytext=(0, 12), textcoords="offset points", ha="center",
                 fontsize=9, color=TEXT_COLOR)
 
@@ -79,7 +79,7 @@ def draw_panel(ax, epochs, train_values, val_values, best_epoch, title, ylabel):
     ax.set_xlabel("epoch")
     ax.set_ylabel(ylabel)
     ax.legend(loc="best")
-    ax.margins(x=0.08)
+    ax.margins(x=0.02)
 
 
 def plot_training(run_dir):
