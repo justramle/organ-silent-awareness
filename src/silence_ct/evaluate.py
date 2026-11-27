@@ -5,7 +5,7 @@ Scores a trained model on the test set (RadGenome valid split, 1,564 scans) and
 compares it with two baselines that need no training. Only hidden written regions
 are scored, because silent regions have no true text.
 
-    model:             state from the state head, sentence from retrieval
+    model:             state from the state head (per-region threshold), sentence from retrieval
     model (retrieval): state from the top-1 retrieved sentence
     mean vector:       always predict the average train text vector of the region
     silence = normal:  always predict the most common NORMAL train sentence of the region
@@ -17,6 +17,7 @@ Run: PYTHONPATH=src python -m silence_ct.evaluate --run_dir <path to run folder>
 """
 
 import argparse
+import json
 from collections import Counter
 from pathlib import Path
 
@@ -206,6 +207,13 @@ def main():
     model, config = load_model(args.run_dir, device)
     root = args.root or config["data_root"]
 
+    # per-region thresholds chosen on validation by train.py (0.5 if missing)
+    thresholds = {}
+    threshold_path = Path(args.run_dir) / "thresholds.json"
+    if threshold_path.exists():
+        with open(threshold_path) as f:
+            thresholds = json.load(f)
+
     dataset = SilenceDataset(root, args.split, config["hide_prob"], config["seed"])
     outputs = collect_predictions(model, dataset, device, config["batch_size"])
     bank = SentenceBank(root, args.bank_split)
@@ -224,7 +232,7 @@ def main():
         # model: state from the state head, sentence from retrieval
         model_vectors = outputs["predicted"][rows, k]
         model_prob = outputs["abnormal_prob"][rows, k]
-        model_states = (model_prob >= 0.5).astype(int)
+        model_states = (model_prob >= thresholds.get(region, 0.5)).astype(int)
         results.append(score_method("model", region, model_vectors, true_vectors,
                                     true_states, model_states, model_prob))
 
@@ -257,7 +265,6 @@ def main():
     print(f"\nall regions saved to {Path(args.run_dir) / f'eval_{args.split}.csv'}")
 
 
-# TODO: choose the abnormal threshold on validation instead of 0.5
 # TODO: text scores (BLEU / ROUGE / BERTScore) between retrieved and true sentence
 # TODO: predictions for SILENT regions (no answer; report predicted state distribution)
 
