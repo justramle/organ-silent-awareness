@@ -1,3 +1,23 @@
-# Paths and settings for training and evaluation.
-# One file for the local sample run and the Colab run; only the paths change.
-# Filled in step by step, starting with dataset.py.
+# Silence-aware CT: training settings
+
+# data
+data_root: /content/drive/MyDrive/silence_ct
+split: train
+val_fraction: 0.1       # 10% of train scans for validation
+hide_prob: 0.3          # chance each written region is hidden
+
+# model
+d_model: 256
+num_heads: 4
+num_layers: 3
+dropout: 0.1
+geometry: both          # none, dist, touch, both (ablation H2)
+head: regression        # regression; diffusion: TODO
+
+# training
+batch_size: 64
+lr: 0.0003
+weight_decay: 0.01
+epochs: 100
+patience: 10            # stop if validation does not improve for 10 epochs
+seed: 42

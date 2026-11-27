@@ -1,11 +1,78 @@
 """
-Full model: tokens -> geometry-biased encoder -> head.
+Silence-aware region model
 
-    1. tokens.py         region tokens from image vectors, text vectors, region embeddings
-    2. encoder.py        transformer with geometry bias, so regions share information
-    3. diffusion_head.py predict the sentence vector of each hidden region
-    4. retrieval.py      (inference only) nearest real sentence
+The full model: tokens -> geometry-aware encoder -> head. Takes one batch from
+SilenceDataset and predicts a text vector for every region (see assets/model_flow.md).
 
-The head type ("diffusion" or "regression") and the bias type ("none", "touch", "dist",
-"both") are set in the config, so all baselines and ablations use the same code.
+Input:  batch dict with image, has_image, text, has_text, distance, touching
+Output: predicted text vectors (B, 9, 768)
 """
+
+import torch
+from torch import nn
+
+from silence_ct.models.tokens import RegionTokens
+from silence_ct.models.encoder import GeometryEncoder
+from silence_ct.models.diffusion_head import RegressionHead
+
+
+class SilenceModel(nn.Module):
+    """
+    Predict the text vector of each region from its image, the other regions' text
+    and the geometry between regions.
+
+      - tokens:  image + text + region embedding -> one token per region
+      - encoder: regions look at each other, nearby regions matter more
+      - head:    token -> predicted text vector
+
+    Args:
+        d_model: size of each token
+        num_heads: number of attention heads
+        num_layers: number of transformer layers
+        dropout: dropout rate
+        mode: geometry mode ("none", "dist", "touch", "both")
+    """
+
+    def __init__(self, d_model=256, num_heads=4, num_layers=3, dropout=0.1, mode="both"):
+        super().__init__()
+        self.tokens = RegionTokens(d_model=d_model)
+        self.encoder = GeometryEncoder(d_model, num_heads, num_layers, dropout, mode)
+        self.head = RegressionHead(d_model, dropout=dropout)
+
+    def forward(self, batch):
+        """
+        Args:
+            batch: dict from SilenceDataset (batched by DataLoader), with
+                image (B, 9, 1024), has_image (B, 9), text (B, 9, 768),
+                has_text (B, 9), distance (B, 9, 9), touching (B, 9, 9)
+
+        Returns:
+            predicted: (B, 9, 768)
+        """
+        tokens = self.tokens(batch["image"], 
+                             batch["has_image"],
+                             batch["text"], 
+                             batch["has_text"])
+        encoded = self.encoder(tokens, 
+                               batch["distance"], 
+                               batch["touching"])
+        return self.head(encoded)
+
+
+if __name__ == "__main__":
+    # PYTHONPATH=src python -m silence_ct.models.model
+    batch_size = 2
+    batch = {
+        "image": torch.randn(batch_size, 9, 1024),
+        "has_image": torch.rand(batch_size, 9) > 0.3,
+        "text": torch.randn(batch_size, 9, 768),
+        "has_text": torch.rand(batch_size, 9) > 0.5,
+        "distance": torch.rand(batch_size, 9, 9) * 300,
+        "touching": (torch.rand(batch_size, 9, 9) > 0.7).float(),
+    }
+
+    model = SilenceModel()
+    predicted = model(batch)
+    num_weights = sum(p.numel() for p in model.parameters())
+    print("predicted:", tuple(predicted.shape))     #  (2, 9, 768)
+    print("weights:", num_weights)

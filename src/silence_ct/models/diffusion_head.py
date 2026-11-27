@@ -1,15 +1,59 @@
 """
-Prediction heads: from the encoder token of a hidden region to its sentence vector (768-d).
+Prediction heads
 
-DiffusionHead (main)
-    A small denoising network conditioned on the region token. During training, noise is
-    added to the true sentence vector and the head learns to remove it. At test time we
-    start from noise and denoise step by step. Sampling several times gives several
-    possible sentences; their spread is used as an uncertainty estimate.
+Turn each encoded region token into a predicted text vector (CT-CLIP, 768).
+Flow: encoder.py -> head -> predicted text vector.
 
-RegressionHead (baseline)
-    A small MLP that predicts the sentence vector directly in one step. Same input as the
-    diffusion head, but only one answer and no uncertainty.
+    RegressionHead: one predicted vector per region (baseline)
+    DiffusionHead:  several possible vectors per region (TODO)
 
-Comparing the two heads tests whether modeling several possible sentences helps.
+Input:  encoded tokens (B, 9, d_model)
+Output: predicted text vectors (B, 9, 768)
 """
+
+import torch
+from torch import nn
+
+
+class RegressionHead(nn.Module):
+    """
+    Predict one text vector for every region with a small MLP.
+
+    It predicts for all 9 regions, but which predictions are used depends on the step:
+      - training -> only hidden regions go into the loss
+      - test     -> hidden regions are scored; silent regions are the ones we fill
+
+    Args:
+        d_model: size of each encoded token
+        text_dim: size of the CT-CLIP text vector (768)
+        dropout: dropout rate
+    """
+
+    def __init__(self, d_model=256, text_dim=768, dropout=0.1):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, text_dim),
+        )
+
+    def forward(self, encoded):
+        """
+        Args:
+            encoded: (B, 9, d_model) tokens from GeometryEncoder
+
+        Returns:
+            predicted: (B, 9, 768) predicted text vector per region
+        """
+        return self.mlp(encoded)
+
+
+# TODO: DiffusionHead (noise prediction conditioned on the encoded token)
+
+
+if __name__ == "__main__":
+    # PYTHONPATH=src python -m silence_ct.models.diffusion_head
+    encoded = torch.randn(2, 9, 256)
+    predicted = RegressionHead()(encoded)
+    print("predicted:", tuple(predicted.shape))     #  (2, 9, 768)

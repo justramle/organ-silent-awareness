@@ -188,6 +188,60 @@ def load_geometry(path, regions):
     distance[np.isnan(distance)] = FAR_DISTANCE_MM
     return distance, touching
 
+def load_image_and_geometry(root, split, regions):
+    """
+    Load image vectors and geometry for every scan of a split, using a cache file.
+
+    Reading thousands of small files from Drive is slow, so the first run saves
+    everything into one file (cache/image_geometry_{split}.npz):
+      - cache exists     -> load it (a few seconds)
+      - no cache yet     -> read every scan's files, then save the cache
+      - data has changed -> delete the cache file so it is built again
+
+    Args:
+        root: data folder (data/ locally, silence_ct on Drive)
+        split: "valid" or "train"
+        regions: list of the 9 region names, in the order the model uses
+
+    Returns:
+        dict with scans (list of N names), image (N, 9, 1024), has_image (N, 9),
+        distance (N, 9, 9), touching (N, 9, 9)
+    """
+    cache_path = Path(root) / "cache" / f"image_geometry_{split}.npz"
+    if cache_path.exists():
+        cache = np.load(cache_path)
+        arrays = {key: cache[key] for key in cache.files}
+        arrays["scans"] = list(arrays["scans"])
+        return arrays
+
+    # scans that have both organ vectors and geometry
+    organ_scans = {Path(f).stem for f in glob.glob(f"{root}/organ_vectors/{split}/*.npy")}
+    geo_scans = {Path(f).stem for f in glob.glob(f"{root}/geometry/{split}/*.npz")}
+    scans = sorted(organ_scans & geo_scans)
+
+    image, has_image, distance, touching = [], [], [], []
+    for scan in scans:
+        organ_vectors = np.load(f"{root}/organ_vectors/{split}/{scan}.npy").astype(np.float32)
+        scan_image, scan_has_image = organs_to_regions(organ_vectors, regions)
+        scan_distance, scan_touching = load_geometry(f"{root}/geometry/{split}/{scan}.npz", regions)
+
+        image.append(scan_image)
+        has_image.append(scan_has_image)
+        distance.append(scan_distance)
+        touching.append(scan_touching)
+
+    arrays = {
+        "scans": scans,
+        "image": np.stack(image),
+        "has_image": np.stack(has_image),
+        "distance": np.stack(distance),
+        "touching": np.stack(touching),
+    }
+    cache_path.parent.mkdir(exist_ok=True)
+    np.savez(cache_path, **arrays)
+    return arrays
+
+
 class SilenceDataset(Dataset):
     """
     One item = one CT scan, with all inputs for its 9 regions.
@@ -213,18 +267,19 @@ class SilenceDataset(Dataset):
 
         self.text = load_text(root, split, self.regions)
 
-        # keep only scans that have organ vectors, geometry and text
-        organ_scans = {Path(f).stem for f in glob.glob(f"{root}/organ_vectors/{split}/*.npy")}
-        geo_scans = {Path(f).stem for f in glob.glob(f"{root}/geometry/{split}/*.npz")}
-        self.scans = sorted(organ_scans & geo_scans & set(self.text))
+        arrays = load_image_and_geometry(root, split, self.regions)
+        self.image = arrays["image"]
+        self.has_image = arrays["has_image"]
+        self.distance = arrays["distance"]
+        self.touching = arrays["touching"]
 
-        # load everything once, so __getitem__ does not read from Drive
-        self.image = {}
-        self.geometry = {}
-        for scan in self.scans:
-            organ_vectors = np.load(f"{root}/organ_vectors/{split}/{scan}.npy").astype(np.float32)
-            self.image[scan] = organs_to_regions(organ_vectors, self.regions)
-            self.geometry[scan] = load_geometry(f"{root}/geometry/{split}/{scan}.npz", self.regions)
+        # keep only scans that also have text; remember each scan's row in the arrays
+        self.scans = []
+        self.row = {}
+        for i, scan in enumerate(arrays["scans"]):
+            if scan in self.text:
+                self.scans.append(scan)
+                self.row[scan] = i
 
     def __len__(self):
         return len(self.scans)
@@ -275,7 +330,9 @@ class SilenceDataset(Dataset):
 
         scan = self.scans[idx]
 
-        image, has_image = self.image[scan]
+        row = self.row[scan]
+        image = self.image[row]
+        has_image = self.has_image[row]
 
         text, state = self.text[scan]
         is_hidden = self.choose_hidden(state)
@@ -289,7 +346,8 @@ class SilenceDataset(Dataset):
         visible_text[is_hidden] = 0
         has_text = (state != STATE_IDS["SILENT"]) & ~is_hidden
 
-        distance, touching = self.geometry[scan]
+        distance = self.distance[row]
+        touching = self.touching[row]
 
         return {
             "scan": scan,
@@ -306,7 +364,6 @@ class SilenceDataset(Dataset):
 
 
 if __name__ == "__main__":
-    # quick check (Colab: Drive, Mac: data/)
     # PYTHONPATH=src python -m silence_ct.data.dataset
     
     root = "/content/drive/MyDrive/silence_ct"
