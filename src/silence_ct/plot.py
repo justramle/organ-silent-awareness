@@ -87,7 +87,7 @@ def plot_training(run_dir):
     Draw training curves for one run and save them as training_curves.png.
 
     Two panels:
-      - loss:   train and validation (1 - cosine), lower is better
+      - loss:   train and validation total loss (vector + state), lower is better
       - cosine: train and validation, higher is better (1 = perfect)
     Train numbers use dropout, so they are not exactly comparable to validation.
 
@@ -105,8 +105,8 @@ def plot_training(run_dir):
         fig, (loss_ax, cosine_ax) = plt.subplots(1, 2, figsize=(10, 3.8))
 
         draw_panel(loss_ax, epochs, log["train_loss"], log["val_loss"], best_epoch,
-                   "Loss", "1 − cosine")
-        draw_panel(cosine_ax, epochs, 1 - log["train_loss"], log["val_cosine"], best_epoch,
+                   "Loss", "vector + state loss")
+        draw_panel(cosine_ax, epochs, 1 - log["train_vector_loss"], log["val_cosine"], best_epoch,
                    "Cosine similarity", "cosine")
 
         fig.suptitle(Path(run_dir).name, x=0.01, ha="left", color=MUTED_COLOR, fontsize=9)

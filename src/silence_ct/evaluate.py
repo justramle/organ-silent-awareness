@@ -5,11 +5,13 @@ Scores a trained model on the test set (RadGenome valid split, 1,564 scans) and
 compares it with two baselines that need no training. Only hidden written regions
 are scored, because silent regions have no true text.
 
-    mean vector:      always predict the average train text vector of the region
-    silence = normal: always predict the most common NORMAL train sentence of the region
+    model:             state from the state head, sentence from retrieval
+    model (retrieval): state from the top-1 retrieved sentence
+    mean vector:       always predict the average train text vector of the region
+    silence = normal:  always predict the most common NORMAL train sentence of the region
 
-For every method and region: cosine with the true vector, and retrieval from the
-train bank -> normal/abnormal accuracy, precision, recall, F1 and ROC-AUC.
+For every method and region: cosine with the true vector, and normal/abnormal
+accuracy, precision, recall, F1 and ROC-AUC.
 
 Run: PYTHONPATH=src python -m silence_ct.evaluate --run_dir <path to run folder>
 """
@@ -46,12 +48,8 @@ def load_model(run_dir, device):
     with open(Path(run_dir) / "config.yaml") as f:
         config = yaml.safe_load(f)
 
-    model = SilenceModel(config["d_model"], 
-                         config["num_heads"], 
-                         config["num_layers"],
-                         config["dropout"], 
-                         config["geometry"])
-    
+    model = SilenceModel(config["d_model"], config["num_heads"], config["num_layers"],
+                         config["dropout"], config["geometry"])
     state = torch.load(Path(run_dir) / "best.pt", map_location=device)
     model.load_state_dict(state)
     model.to(device).eval()
@@ -72,10 +70,10 @@ def collect_predictions(model, dataset, device, batch_size):
         batch_size: scans per batch
 
     Returns:
-        dict of numpy arrays: scans (N,), predicted (N, 9, 768), target (N, 9, 768),
-        is_hidden (N, 9), state (N, 9)
+        dict of numpy arrays: scans (N,), predicted (N, 9, 768), abnormal_prob (N, 9),
+        target (N, 9, 768), is_hidden (N, 9), state (N, 9)
     """
-    scans, predicted, target, is_hidden, state = [], [], [], [], []
+    scans, predicted, abnormal_prob, target, is_hidden, state = [], [], [], [], [], []
     with torch.no_grad():
         for batch in DataLoader(dataset, batch_size=batch_size):
             scans.extend(batch["scan"])
@@ -83,12 +81,14 @@ def collect_predictions(model, dataset, device, batch_size):
             is_hidden.append(batch["is_hidden"].numpy())
             state.append(batch["state"].numpy())
 
-            batch = to_device(batch, device)
-            predicted.append(model(batch).cpu().numpy())
+            outputs = model(to_device(batch, device))
+            predicted.append(outputs["vector"].cpu().numpy())
+            abnormal_prob.append(torch.sigmoid(outputs["abnormal_logit"]).cpu().numpy())
 
     return {
         "scans": np.array(scans),
         "predicted": np.concatenate(predicted),
+        "abnormal_prob": np.concatenate(abnormal_prob),
         "target": np.concatenate(target),
         "is_hidden": np.concatenate(is_hidden),
         "state": np.concatenate(state),
@@ -121,29 +121,24 @@ def baseline_vectors(bank, region):
     return {"mean vector": mean_vector, "silence = normal": normal_vector}
 
 
-def score_method(predicted, true_vectors, true_states, bank, region, top_k):
+def retrieve_states(predicted, bank, region, top_k):
     """
-    Score one method on the hidden regions of one region type.
+    Turn predicted vectors into states and sentences by retrieval from the train bank.
 
-      - cosine: predicted vs true text vector
-      - top-1 retrieved state -> accuracy, precision, recall, F1 (ABNORMAL = positive)
-      - share of ABNORMAL among top_k retrieved -> score for ROC-AUC
-        (only one class in the test rows -> ROC-AUC is NaN)
+      - top-1 retrieved state -> predicted state (1 ABNORMAL, 0 NORMAL)
+      - share of ABNORMAL among top_k -> abnormal score for ROC-AUC
 
     Args:
         predicted: (N, 768) predicted vectors
-        true_vectors: (N, 768) true text vectors
-        true_states: (N,) 1 ABNORMAL, 0 NORMAL
         bank: SentenceBank built from train texts
         region: region name
-        top_k: number of retrieved texts used for the ROC-AUC score
+        top_k: number of retrieved texts used for the score
 
     Returns:
-        scores: dict of metrics
+        predicted_states: (N,) 0/1
+        abnormal_share: (N,) between 0 and 1
         retrieved: list of N top-1 texts
     """
-    cosine = np.sum(normalize(predicted) * normalize(true_vectors), axis=1)
-
     texts, states, _ = bank.retrieve(predicted, region, top_k=top_k)
     predicted_states = []
     abnormal_share = []
@@ -151,15 +146,42 @@ def score_method(predicted, true_vectors, true_states, bank, region, top_k):
         predicted_states.append(1 if row[0] == "ABNORMAL" else 0)
         abnormal_share.append(row.count("ABNORMAL") / len(row))
 
+    retrieved = [row[0] for row in texts]
+    return np.array(predicted_states), np.array(abnormal_share), retrieved
+
+
+def score_method(method, region, predicted, true_vectors, true_states,
+                 predicted_states, abnormal_score):
+    """
+    Compute all scores of one method on the hidden regions of one region type.
+
+      - cosine between predicted and true text vectors
+      - accuracy, precision, recall, F1 with ABNORMAL as the positive class
+      - ROC-AUC from the abnormal score (NaN if the test rows have only one class)
+
+    Args:
+        method: method name
+        region: region name
+        predicted: (N, 768) predicted vectors
+        true_vectors: (N, 768) true text vectors
+        true_states: (N,) 1 ABNORMAL, 0 NORMAL
+        predicted_states: (N,) 0/1
+        abnormal_score: (N,) higher = more likely abnormal
+
+    Returns:
+        dict with one row of results
+    """
+    cosine = np.sum(normalize(predicted) * normalize(true_vectors), axis=1)
     precision, recall, f1, _ = precision_recall_fscore_support(
-        true_states, predicted_states, 
-        average="binary", pos_label=1, zero_division=0,
+        true_states, predicted_states, average="binary", pos_label=1, zero_division=0,
     )
     roc_auc = float("nan")
     if len(set(true_states)) == 2:
-        roc_auc = roc_auc_score(true_states, abnormal_share)
+        roc_auc = roc_auc_score(true_states, abnormal_score)
 
-    scores = {
+    return {
+        "method": method,
+        "region": region,
         "n": len(true_states),
         "n_abnormal": int(sum(true_states)),
         "cosine": float(cosine.mean()),
@@ -169,8 +191,6 @@ def score_method(predicted, true_vectors, true_states, bank, region, top_k):
         "f1": f1,
         "roc_auc": roc_auc,
     }
-    retrieved = [row[0] for row in texts]
-    return scores, retrieved
 
 
 def main():
@@ -186,13 +206,8 @@ def main():
     model, config = load_model(args.run_dir, device)
     root = args.root or config["data_root"]
 
-    dataset = SilenceDataset(root, args.split, 
-                             config["hide_prob"], 
-                             config["seed"])
-    outputs = collect_predictions(model, 
-                                  dataset, 
-                                  device, 
-                                  config["batch_size"])
+    dataset = SilenceDataset(root, args.split, config["hide_prob"], config["seed"])
+    outputs = collect_predictions(model, dataset, device, config["batch_size"])
     bank = SentenceBank(root, args.bank_split)
     print(f"{args.split}: {len(dataset)} scans, bank: {args.bank_split}")
 
@@ -206,19 +221,29 @@ def main():
         true_vectors = outputs["target"][rows, k]
         true_states = (outputs["state"][rows, k] == STATE_IDS["ABNORMAL"]).astype(int)
 
-        methods = {"model": outputs["predicted"][rows, k]}
+        # model: state from the state head, sentence from retrieval
+        model_vectors = outputs["predicted"][rows, k]
+        model_prob = outputs["abnormal_prob"][rows, k]
+        model_states = (model_prob >= 0.5).astype(int)
+        results.append(score_method("model", region, model_vectors, true_vectors,
+                                    true_states, model_states, model_prob))
+
+        # model (retrieval): state from the top-1 retrieved sentence
+        states, share, retrieved = retrieve_states(model_vectors, bank, region, args.top_k)
+        results.append(score_method("model (retrieval)", region, model_vectors, true_vectors,
+                                    true_states, states, share))
+
+        for scan, state, prob, text in zip(outputs["scans"][rows], true_states,
+                                           model_prob, retrieved):
+            examples.append({"scan": scan, "region": region, "true_state": state,
+                             "abnormal_prob": prob, "retrieved": text})
+
+        # baselines: the same vector for every scan
         for name, vector in baseline_vectors(bank, region).items():
-            methods[name] = np.tile(vector, (len(true_states), 1))
-
-        for name, predicted in methods.items():
-            scores, retrieved = score_method(predicted, true_vectors, true_states,
-                                             bank, region, args.top_k)
-            results.append({"method": name, "region": region, **scores})
-
-            if name == "model":
-                for scan, state, text in zip(outputs["scans"][rows], true_states, retrieved):
-                    examples.append({"scan": scan, "region": region,
-                                     "true_state": state, "retrieved": text})
+            vectors = np.tile(vector, (len(true_states), 1))
+            states, share, _ = retrieve_states(vectors, bank, region, args.top_k)
+            results.append(score_method(name, region, vectors, true_vectors,
+                                        true_states, states, share))
 
     results = pd.DataFrame(results)
     results.to_csv(Path(args.run_dir) / f"eval_{args.split}.csv", index=False)
@@ -232,6 +257,7 @@ def main():
     print(f"\nall regions saved to {Path(args.run_dir) / f'eval_{args.split}.csv'}")
 
 
+# TODO: choose the abnormal threshold on validation instead of 0.5
 # TODO: text scores (BLEU / ROUGE / BERTScore) between retrieved and true sentence
 # TODO: predictions for SILENT regions (no answer; report predicted state distribution)
 

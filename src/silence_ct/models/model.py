@@ -5,7 +5,7 @@ The full model: tokens -> geometry-aware encoder -> head. Takes one batch from
 SilenceDataset and predicts a text vector for every region (see assets/model_flow.md).
 
 Input:  batch dict with image, has_image, text, has_text, distance, touching
-Output: predicted text vectors (B, 9, 768)
+Output: predicted text vectors (B, 9, 768) and abnormal logits (B, 9)
 """
 
 import torch
@@ -18,12 +18,13 @@ from silence_ct.models.diffusion_head import RegressionHead
 
 class SilenceModel(nn.Module):
     """
-    Predict the text vector of each region from its image, the other regions' text
-    and the geometry between regions.
+    Predict the text vector and the normal/abnormal state of each region from its
+    image, the other regions' text and the geometry between regions.
 
-      - tokens:  image + text + region embedding -> one token per region
-      - encoder: regions look at each other, nearby regions matter more
-      - head:    token -> predicted text vector
+      - tokens:     image + text + region embedding -> one token per region
+      - encoder:    regions look at each other, nearby regions matter more
+      - head:       token -> predicted text vector (sentence via retrieval)
+      - state head: token -> logit of "abnormal" (multi-task, shares the encoder)
 
     Args:
         d_model: size of each token
@@ -38,6 +39,7 @@ class SilenceModel(nn.Module):
         self.tokens = RegionTokens(d_model=d_model)
         self.encoder = GeometryEncoder(d_model, num_heads, num_layers, dropout, mode)
         self.head = RegressionHead(d_model, dropout=dropout)
+        self.state_head = nn.Linear(d_model, 1)
 
     def forward(self, batch):
         """
@@ -47,16 +49,15 @@ class SilenceModel(nn.Module):
                 has_text (B, 9), distance (B, 9, 9), touching (B, 9, 9)
 
         Returns:
-            predicted: (B, 9, 768)
+            dict with vector (B, 9, 768) and abnormal_logit (B, 9)
         """
-        tokens = self.tokens(batch["image"], 
-                             batch["has_image"],
-                             batch["text"], 
-                             batch["has_text"])
-        encoded = self.encoder(tokens, 
-                               batch["distance"], 
-                               batch["touching"])
-        return self.head(encoded)
+        tokens = self.tokens(batch["image"], batch["has_image"],
+                             batch["text"], batch["has_text"])
+        encoded = self.encoder(tokens, batch["distance"], batch["touching"])
+        return {
+            "vector": self.head(encoded),
+            "abnormal_logit": self.state_head(encoded).squeeze(-1),
+        }
 
 
 if __name__ == "__main__":
@@ -72,7 +73,8 @@ if __name__ == "__main__":
     }
 
     model = SilenceModel()
-    predicted = model(batch)
+    outputs = model(batch)
     num_weights = sum(p.numel() for p in model.parameters())
-    print("predicted:", tuple(predicted.shape))     #  (2, 9, 768)
+    print("vector:", tuple(outputs["vector"].shape))                  #  (2, 9, 768)
+    print("abnormal_logit:", tuple(outputs["abnormal_logit"].shape))  #  (2, 9)
     print("weights:", num_weights)

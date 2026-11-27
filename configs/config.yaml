@@ -7,6 +7,7 @@ val_fraction: 0.1       # 10% of train scans for validation
 hide_prob: 0.3          # chance each written region is hidden
 
 # model
+state_weight: 1.0       # weight of the normal/abnormal loss (0 = vector only)
 d_model: 256
 num_heads: 4
 num_layers: 3

@@ -22,7 +22,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, Subset
 
 from silence_ct.data.dataset import SilenceDataset
-from silence_ct.losses import cosine_loss
+from silence_ct.losses import cosine_loss, state_loss
 from silence_ct.models.model import SilenceModel
 
 
@@ -134,41 +134,51 @@ def to_device(batch, device):
     return moved
 
 
-def run_epoch(model, batches, device, optimizer=None):
+def run_epoch(model, batches, device, state_weight, optimizer=None):
     """
-    Go through all batches once and return the average loss.
+    Go through all batches once and return the average losses.
 
       - optimizer given -> training: update the weights
       - no optimizer    -> validation: only measure
+      - total loss = vector loss (cosine) + state_weight * state loss (cross-entropy)
 
     Args:
         model: SilenceModel
         batches: DataLoader or list of batches
         device: "cuda" or "cpu"
+        state_weight: weight of the state loss
         optimizer: optimizer, or None for validation
 
     Returns:
-        average loss over the batches
+        dict with average loss, vector_loss and state_loss
     """
     training = optimizer is not None
     model.train(training)
 
-    total_loss = 0.0
+    totals = {"loss": 0.0, "vector_loss": 0.0, "state_loss": 0.0}
     num_batches = 0
     for batch in batches:
         batch = to_device(batch, device)
         with torch.set_grad_enabled(training):
-            predicted = model(batch)
-            loss = cosine_loss(predicted, batch["target"], batch["is_hidden"])
+            outputs = model(batch)
+            vector_loss = cosine_loss(outputs["vector"], batch["target"], batch["is_hidden"])
+            abnormal_loss = state_loss(outputs["abnormal_logit"], batch["state"], batch["is_hidden"])
+            loss = vector_loss + state_weight * abnormal_loss
 
         if training:
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-        total_loss += loss.item()
+        totals["loss"] += loss.item()
+        totals["vector_loss"] += vector_loss.item()
+        totals["state_loss"] += abnormal_loss.item()
         num_batches += 1
-    return total_loss / num_batches
+
+    averages = {}
+    for key, value in totals.items():
+        averages[key] = value / num_batches
+    return averages
 
 
 def main():
@@ -201,35 +211,40 @@ def main():
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["lr"],
                                   weight_decay=config["weight_decay"])
 
-    # one folder per run, e.g. runs/regression_both
-    run_dir = Path(root) / "runs" / f"{config['head']}_{config['geometry']}"
+    # one folder per run, e.g. runs/regression_both_state
+    run_name = f"{config['head']}_{config['geometry']}"
+    if config["state_weight"] > 0:
+        run_name += "_state"
+    run_dir = Path(root) / "runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "config.yaml", "w") as f:
         yaml.safe_dump(config, f)
 
     log_file = open(run_dir / "log.csv", "w", newline="")
     log = csv.writer(log_file)
-    log.writerow(["epoch", "train_loss", "val_loss", "val_cosine", "seconds"])
+    log.writerow(["epoch", "train_loss", "train_vector_loss", "train_state_loss",
+                  "val_loss", "val_vector_loss", "val_state_loss", "val_cosine", "seconds"])
 
     best_val_loss = float("inf")
     epochs_without_improvement = 0
     for epoch in range(1, config["epochs"] + 1):
         start = time.time()
-        train_loss = run_epoch(model, train_loader, device, optimizer)
-        val_loss = run_epoch(model, val_batches, device)
-
-        if np.isnan(val_loss):
-            raise ValueError("validation loss is NaN, check the model or data")
-        
+        train = run_epoch(model, train_loader, device, config["state_weight"], optimizer)
+        val = run_epoch(model, val_batches, device, config["state_weight"])
         seconds = time.time() - start
 
-        print(f"epoch {epoch:3d}  train {train_loss:.4f}  val {val_loss:.4f}  "
-              f"val cosine {1 - val_loss:.4f}  ({seconds:.1f}s)")
-        log.writerow([epoch, train_loss, val_loss, 1 - val_loss, seconds])
+        if np.isnan(val["loss"]):
+            raise ValueError("validation loss is NaN, check the model or data")
+
+        val_cosine = 1 - val["vector_loss"]
+        print(f"epoch {epoch:3d}  train {train['loss']:.4f}  val {val['loss']:.4f}  "
+              f"val cosine {val_cosine:.4f}  val state {val['state_loss']:.4f}  ({seconds:.1f}s)")
+        log.writerow([epoch, train["loss"], train["vector_loss"], train["state_loss"],
+                      val["loss"], val["vector_loss"], val["state_loss"], val_cosine, seconds])
         log_file.flush()
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val["loss"] < best_val_loss:
+            best_val_loss = val["loss"]
             epochs_without_improvement = 0
             torch.save(model.state_dict(), run_dir / "best.pt")
         else:
@@ -239,7 +254,7 @@ def main():
                 break
 
     log_file.close()
-    print(f"best val cosine: {1 - best_val_loss:.4f}  saved to {run_dir}")
+    print(f"best val loss: {best_val_loss:.4f}  saved to {run_dir}")
 
 
 if __name__ == "__main__":
