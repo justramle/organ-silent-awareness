@@ -217,6 +217,10 @@ def main():
         start = time.time()
         train_loss = run_epoch(model, train_loader, device, optimizer)
         val_loss = run_epoch(model, val_batches, device)
+
+        if np.isnan(val_loss):
+            raise ValueError("validation loss is NaN, check the model or data")
+        
         seconds = time.time() - start
 
         print(f"epoch {epoch:3d}  train {train_loss:.4f}  val {val_loss:.4f}  "

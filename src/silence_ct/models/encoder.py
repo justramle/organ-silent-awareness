@@ -13,6 +13,7 @@ import torch
 from torch import nn
 
 from silence_ct.models.geometry_bias import GeometryBias
+torch.backends.mha.set_fastpath_enabled(False)
 
 
 class GeometryEncoder(nn.Module):
