@@ -123,12 +123,20 @@ def plot_training(run_dir):
     else:
         best_epoch = int(log.loc[log["val_loss"].idxmin(), "epoch"])
 
+    # older runs (vector only) have no separate vector / state loss
+    if "train_vector_loss" in log.columns:
+        train_vector_loss = log["train_vector_loss"]
+        loss_label = "vector + state loss"
+    else:
+        train_vector_loss = log["train_loss"]
+        loss_label = "1 − cosine"
+
     with plt.rc_context(STYLE):
         fig, (loss_ax, cosine_ax) = plt.subplots(1, 2, figsize=(10, 3.8))
 
         draw_panel(loss_ax, epochs, log["train_loss"], log["val_loss"], best_epoch,
-                   "Loss", "vector + state loss")
-        draw_panel(cosine_ax, epochs, 1 - log["train_vector_loss"], log["val_cosine"], best_epoch,
+                   "Loss", loss_label)
+        draw_panel(cosine_ax, epochs, 1 - train_vector_loss, log["val_cosine"], best_epoch,
                    "Cosine similarity", "cosine")
 
         fig.suptitle(Path(run_dir).name, x=0.01, ha="left", color=MUTED_COLOR, fontsize=9)
