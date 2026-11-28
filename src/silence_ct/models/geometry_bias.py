@@ -38,8 +38,9 @@ class GeometryBias(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.mode = mode
-        self.distance_weight = nn.Parameter(torch.ones(num_heads))
-        self.touch_weight = nn.Parameter(torch.ones(num_heads))
+        # start at 0: the model begins with no geometry and only uses it if it helps
+        self.distance_weight = nn.Parameter(torch.zeros(num_heads))
+        self.touch_weight = nn.Parameter(torch.zeros(num_heads))
 
     def forward(self, distance, touching):
         """

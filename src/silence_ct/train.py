@@ -47,6 +47,7 @@ def load_config():
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--geometry")
     parser.add_argument("--name")        # run folder name; default from head and geometry
+    parser.add_argument("--model_seed", type=int)   # random start of the model; data split stays fixed
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -61,6 +62,10 @@ def load_config():
     if args.geometry:
         config["geometry"] = args.geometry
     config["name"] = args.name
+
+    # model seed: random weights and batch order; config["seed"] keeps the data split fixed
+    config["model_seed"] = args.model_seed if args.model_seed is not None else config["seed"]
+    config["seed_in_name"] = args.model_seed is not None
     return config
 
 
@@ -274,7 +279,7 @@ def choose_thresholds(probs, states, is_hidden, regions):
 
 def main():
     config = load_config()
-    torch.manual_seed(config["seed"])
+    torch.manual_seed(config["model_seed"])
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("device:", device)
 
@@ -308,6 +313,8 @@ def main():
         run_name = f"{config['head']}_{config['geometry']}"
         if config["state_weight"] > 0:
             run_name += "_state"
+    if config["seed_in_name"]:
+        run_name += f"_seed{config['model_seed']}"
     run_dir = Path(root) / "runs" / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "config.yaml", "w") as f:
