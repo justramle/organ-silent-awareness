@@ -1,0 +1,30 @@
+flowchart LR
+    subgraph IN["Inputs for one CT scan"]
+        direction TB
+        CT["3D CT scan"] -->|"OrganLens (frozen)"| IMG["9 organ image vectors"]
+        REP["Report sentences<br/>(silent / hidden region = no text)"] -->|"CT-CLIP text (frozen)"| TXT["9 text vectors"]
+    end
+    IMG --> TOK["9 region tokens<br/>image + text + region name"]
+    TXT --> TOK
+    TOK --> ENC["Transformer encoder<br/>3 layers · 4 heads<br/>(regions share information)"]
+    ENC --> SH["State head"]
+    ENC --> DH["Diffusion head<br/>(stage 2)"]
+    ENC -.-> RH["Regression head<br/>(baseline)"]
+    SH --> P["P(abnormal)<br/>e.g. 0.80"]
+    DH --> S["10 text vectors"]
+    S --> RET["Retrieval<br/>real train sentences<br/>of the SAME region"]
+    RH -.-> RET
+    RET --> SEN["Candidate sentences<br/>e.g. 'Mild esophageal wall thickening.'<br/>7 / 10 abnormal"]
+    S --> U["Spread of the 10 samples<br/>= uncertainty"]
+
+    classDef state fill:#257de0,stroke:#1a5fae,color:#ffffff
+    classDef diff fill:#00b894,stroke:#00866b,color:#ffffff
+    classDef reg fill:#f47230,stroke:#c4561d,color:#ffffff
+    classDef frozen fill:#f2f2f2,stroke:#999999,color:#191919
+    classDef out fill:#ffffff,stroke:#191919,color:#191919
+    class SH,P state
+    class DH,S,U diff
+    class RH reg
+    class CT,REP,IMG,TXT,TOK,ENC frozen
+    class RET,SEN out
+    style IN fill:#fafafa,stroke:#cccccc,color:#191919

@@ -12,6 +12,8 @@ so they are not scored. No random hiding, so results are the same every run.
     model (retrieval): state from the top-1 retrieved sentence
     model (diffusion samples): diffusion runs only; P(abnormal) = share of the samples
                        whose retrieved sentence is abnormal
+    regression (retrieval): diffusion runs only; the frozen stage-1 regression head's
+                       vector -> retrieved sentence (for a direct comparison)
     mean vector:       always predict the average train text vector of the region
     silence = normal:  always predict the most common NORMAL train sentence of the region
 
@@ -46,8 +48,12 @@ from silence_ct.models.retrieval import SentenceBank, normalize
 from silence_ct.plot import MUTED_COLOR, STYLE, TRAIN_COLOR
 from silence_ct.train import to_device
 
-# ROC curve colour per region (others use the default blue)
-REGION_COLORS = {"heart": "#6a4ce2", "esophagus": "#00b894"}
+# ROC curve colour per head 
+HEAD_COLORS = {
+    "diffusion head": "#4f9a3a",     # green
+    "state head": "#ee9b98",         # pink
+    "regression head": "#a8c8e1",    # light blue
+}
 
 SCORE_COLUMNS = ["cosine", "accuracy", "precision", "recall", "f1", "roc_auc"]
 
@@ -378,12 +384,11 @@ def plot_roc(roc_data, out_path, columns=2):
     """
     Draw ROC curves on the test set, one panel per region; a panel can hold several curves.
 
-      - solid line  -> state head P(abnormal) (or retrieval for runs without a state head)
-      - dashed line -> diffusion samples (share of samples whose sentence is abnormal)
+      - one colour per head: diffusion (green), state (pink), regression (lavender)
       - dashed grey diagonal -> random guessing (AUC 0.5); the baselines sit here
 
     Args:
-        roc_data: dict {region: list of (label, true_states (N,), scores (N,), line style)}
+        roc_data: dict {region: list of (head name, true_states (N,), scores (N,))}
         out_path: where to save the figure
         columns: panels per row (2 for the main figure, 3 for all regions)
     """
@@ -397,12 +402,12 @@ def plot_roc(roc_data, out_path, columns=2):
         axes = axes.flatten()
 
         for ax, (region, curves) in zip(axes, roc_data.items()):
-            color = REGION_COLORS.get(region, TRAIN_COLOR)
-            for label, labels, scores, line_style in curves:
+            for label, labels, scores in curves:
                 false_positive_rate, true_positive_rate, _ = roc_curve(labels, scores)
                 auc = roc_auc_score(labels, scores)
-                ax.plot(false_positive_rate, true_positive_rate, color=color,
-                        linestyle=line_style, label=f"{label} (AUC {auc:.3f})")
+                ax.plot(false_positive_rate, true_positive_rate,
+                        color=HEAD_COLORS.get(label, TRAIN_COLOR), linewidth=2,
+                        label=f"{label} (AUC {auc:.3f})")
             ax.plot([0, 1], [0, 1], color=MUTED_COLOR, linestyle="--", linewidth=1,
                     label="random / baselines (AUC 0.5)")
 
@@ -472,7 +477,8 @@ def main():
                                             num_samples=diffusion_config["num_samples"],
                                             sample_steps=diffusion_config["sample_steps"],
                                             generator=generator)
-        # text vector of a diffusion run = mean of its samples
+        # text vector of a diffusion run = mean of its samples; keep the regression vector to compare
+        outputs["regression_vector"] = outputs["predicted"]
         outputs["predicted"] = normalize(outputs["samples"].mean(axis=1))
 
     bank = SentenceBank(root, args.bank_split)
@@ -522,19 +528,34 @@ def main():
                                         (sample_share >= 0.5).astype(int), sample_share))
             spread = sample_spread(samples)
 
-        # curves for the ROC figure: model, plus diffusion samples for diffusion runs
+            # regression (retrieval): the stage-1 regression head's vector, for comparison
+            regression_vectors = outputs["regression_vector"][rows]
+            regression_states, regression_share, _ = retrieve_states(
+                regression_vectors, bank, region, args.top_k)
+            results.append(score_method("regression (retrieval)", region, regression_vectors,
+                                        true_vectors, true_states, regression_states,
+                                        regression_share))
+
+        # curves for the ROC figure: every head this run has
         if len(set(true_states)) == 2:
-            model_label = "state head" if has_state_head else "retrieval"
-            curves = [(model_label, true_states, model_prob, "-")]
+            curves = []
             if head is not None:
-                curves.append(("diffusion samples", true_states, sample_share, "--"))
+                curves.append(("diffusion head", true_states, sample_share))
+            if has_state_head:
+                curves.append(("state head", true_states, model_prob))
+            if head is not None:
+                curves.append(("regression head", true_states, regression_share))
+            else:
+                curves.append(("regression head", true_states, share))
             roc_data[region] = curves
 
         for i, (scan, state, prob, text) in enumerate(zip(outputs["scans"][rows], true_states,
                                                           model_prob, retrieved)):
             example = {"scan": scan, "region": region, "true_state": state,
-                       "abnormal_prob": prob, "retrieved": text}
+                       "abnormal_prob": prob, "retrieval_share": share[i], "retrieved": text}
             if spread is not None:
+                example["diffusion_share"] = sample_share[i]
+                example["regression_share"] = regression_share[i]
                 example["sample_spread"] = spread[i]
             examples.append(example)
 

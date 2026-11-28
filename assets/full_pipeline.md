@@ -1,5 +1,7 @@
 # Full pipeline: from one silent region to P(abnormal), sentences and uncertainty
 
+![pipeline](pipeline.png)
+
 Example: one test scan. The radiologist wrote about the heart, lung and other regions,
 but wrote **nothing about the esophagus** (silent / hidden).
 

@@ -23,6 +23,7 @@ When a CT report says nothing about an organ, we do **not** assume it is normal.
 
 ## Model
 
+
 ```
 organ vectors (OrganLens) ─┐                                ┌─ state head     → P(abnormal)
 text vectors (CT-CLIP)    ─┼─> 9 region tokens ─> encoder ──┤
@@ -36,8 +37,7 @@ geometry (optional) ───────┘                                    
 - Stage 2 (`train_diffusion.py`): diffusion head on top of the frozen stage-1 model.
 - Geometry bias (distance / touching between organs) is an option; the ablation showed no gain, so the final
   model uses `geometry: none`.
-- Full example with one silent region: [`assets/full_pipeline.md`](assets/full_pipeline.md).
-- Papers behind each part: see the project notes (BERT masking, FT-Transformer, Graphormer, MAR, DALL·E 2 prior,
+- Ideas: (BERT masking, FT-Transformer, Graphormer, MAR, DALL·E 2 prior,
   CXR-RePaiR retrieval).
 
 ---
