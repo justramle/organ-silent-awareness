@@ -6,7 +6,8 @@ Flow: encoder.py -> head -> predicted text vector.
 
     RegressionHead: one predicted vector per region (baseline)
     DiffusionHead:  a distribution over vectors per region; sampling gives several
-                    possible vectors (MAR-style small MLP denoiser, Li et al. 2024)
+                    possible vectors (MAR-style small MLP denoiser, Li et al. 2024; predicts
+                    the clean vector, as the DALL-E 2 prior does for CLIP vectors)
 
 Input:  encoded tokens (B, 9, d_model) or (N, d_model)
 Output: predicted text vectors (B, 9, 768), or samples (N, num_samples, 768)
@@ -78,8 +79,11 @@ class DiffusionHead(nn.Module):
     Model the distribution of a region's text vector with a small denoising MLP.
 
       - training: add noise to the true vector at a random step; the MLP predicts the
-                  noise from the noisy vector, the step and the region's token (condition)
-      - sampling: start from random noise and remove it step by step (DDIM);
+                  CLEAN vector from the noisy vector, the step and the region's token
+                  (predicting the noise instead failed: at high noise its small errors
+                  are blown up when turned back into a vector, so sampling gave random
+                  vectors)
+      - sampling: start from random noise and denoise step by step (DDIM);
                   different start noise -> different samples
     Text vectors are compared by direction, so targets are scaled to length sqrt(768)
     (about unit size per number) and samples are returned with length 1.
@@ -127,9 +131,9 @@ class DiffusionHead(nn.Module):
         angles = steps.float().unsqueeze(-1) * freqs
         return torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
 
-    def predict_noise(self, noisy, steps, condition):
+    def predict_clean(self, noisy, steps, condition):
         """
-        Predict the noise inside a noisy vector.
+        Predict the clean text vector hidden in a noisy vector.
 
         Args:
             noisy: (N, 768) noisy vectors
@@ -137,7 +141,7 @@ class DiffusionHead(nn.Module):
             condition: (N, d_model) encoded token of each region
 
         Returns:
-            predicted noise: (N, 768)
+            predicted clean vector: (N, 768)
         """
         hidden = (self.input_proj(noisy) + self.condition_proj(condition)
                   + self.time_mlp(self.time_embedding(steps)))
@@ -147,7 +151,7 @@ class DiffusionHead(nn.Module):
 
     def loss(self, condition, target, generator=None):
         """
-        Noise-prediction loss (mean squared error) for a set of regions.
+        Denoising loss: mean squared error between predicted and true clean vector.
 
         Args:
             condition: (N, d_model) encoded tokens of hidden regions
@@ -164,7 +168,7 @@ class DiffusionHead(nn.Module):
 
         signal = self.alpha_bar[steps].unsqueeze(-1)
         noisy = signal.sqrt() * clean + (1 - signal).sqrt() * noise
-        return F.mse_loss(self.predict_noise(noisy, steps, condition), noise)
+        return F.mse_loss(self.predict_clean(noisy, steps, condition), clean)
 
     @torch.no_grad()
     def sample(self, condition, num_samples=10, sample_steps=50, generator=None):
@@ -192,10 +196,11 @@ class DiffusionHead(nn.Module):
         for i, step in enumerate(schedule):
             signal = self.alpha_bar[step]
             steps = torch.full((len(vectors),), step, device=vectors.device, dtype=torch.long)
-            noise = self.predict_noise(vectors, steps, condition)
 
-            clean = (vectors - (1 - signal).sqrt() * noise) / signal.sqrt()
+            # guess the clean vector, keep it at the true length, and get the matching noise
+            clean = self.predict_clean(vectors, steps, condition)
             clean = F.normalize(clean, dim=-1) * self.radius
+            noise = (vectors - signal.sqrt() * clean) / (1 - signal).sqrt()
 
             if i == len(schedule) - 1:
                 vectors = clean
@@ -215,6 +220,6 @@ if __name__ == "__main__":
     head = DiffusionHead()
     condition = torch.randn(5, 256)
     target = torch.randn(5, 768)
-    print("diffusion loss:", round(head.loss(condition, target).item(), 3))   # about 1.0 at start
+    print("diffusion loss:", round(head.loss(condition, target).item(), 3))
     samples = head.sample(condition, num_samples=4, sample_steps=10)
     print("samples:", tuple(samples.shape))                           # expect (5, 4, 768)
