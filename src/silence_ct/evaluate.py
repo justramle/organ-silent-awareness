@@ -376,14 +376,14 @@ def macro_average(results):
 
 def plot_roc(roc_data, out_path, columns=2):
     """
-    Draw ROC curves of the model's P(abnormal) on the test set, one panel per region.
+    Draw ROC curves on the test set, one panel per region; a panel can hold several curves.
 
-      - curve above the diagonal -> better than guessing
-      - dashed diagonal          -> random guessing (AUC 0.5); the baselines sit here,
-                                    because they give every scan the same answer
+      - solid line  -> state head P(abnormal) (or retrieval for runs without a state head)
+      - dashed line -> diffusion samples (share of samples whose sentence is abnormal)
+      - dashed grey diagonal -> random guessing (AUC 0.5); the baselines sit here
 
     Args:
-        roc_data: dict {region: (true_states (N,), abnormal_prob (N,))}
+        roc_data: dict {region: list of (label, true_states (N,), scores (N,), line style)}
         out_path: where to save the figure
         columns: panels per row (2 for the main figure, 3 for all regions)
     """
@@ -396,16 +396,17 @@ def plot_roc(roc_data, out_path, columns=2):
                                  figsize=(4.2 * num_columns, 4.2 * num_rows))
         axes = axes.flatten()
 
-        for ax, (region, (labels, probs)) in zip(axes, roc_data.items()):
-            false_positive_rate, true_positive_rate, _ = roc_curve(labels, probs)
-            auc = roc_auc_score(labels, probs)
+        for ax, (region, curves) in zip(axes, roc_data.items()):
             color = REGION_COLORS.get(region, TRAIN_COLOR)
-
-            ax.plot(false_positive_rate, true_positive_rate, color=color,
-                    label=f"model (AUC {auc:.3f})")
+            for label, labels, scores, line_style in curves:
+                false_positive_rate, true_positive_rate, _ = roc_curve(labels, scores)
+                auc = roc_auc_score(labels, scores)
+                ax.plot(false_positive_rate, true_positive_rate, color=color,
+                        linestyle=line_style, label=f"{label} (AUC {auc:.3f})")
             ax.plot([0, 1], [0, 1], color=MUTED_COLOR, linestyle="--", linewidth=1,
                     label="random / baselines (AUC 0.5)")
 
+            labels = curves[0][1]
             ax.set_title(f"{region} (n = {len(labels)}, abnormal = {int(sum(labels))})",
                          fontsize=10)
             ax.set_xlabel("false positive rate")
@@ -500,8 +501,6 @@ def main():
         else:
             # older run without a state head: abnormal score from retrieval
             model_prob = share
-        if len(set(true_states)) == 2:
-            roc_data[region] = (true_states, model_prob)
 
         # model (retrieval): state from the top-1 retrieved sentence
         results.append(score_method("model (retrieval)", region, model_vectors, true_vectors,
@@ -522,6 +521,14 @@ def main():
                                         true_vectors, true_states,
                                         (sample_share >= 0.5).astype(int), sample_share))
             spread = sample_spread(samples)
+
+        # curves for the ROC figure: model, plus diffusion samples for diffusion runs
+        if len(set(true_states)) == 2:
+            model_label = "state head" if has_state_head else "retrieval"
+            curves = [(model_label, true_states, model_prob, "-")]
+            if head is not None:
+                curves.append(("diffusion samples", true_states, sample_share, "--"))
+            roc_data[region] = curves
 
         for i, (scan, state, prob, text) in enumerate(zip(outputs["scans"][rows], true_states,
                                                           model_prob, retrieved)):
