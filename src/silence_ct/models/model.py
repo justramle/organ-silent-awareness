@@ -41,6 +41,20 @@ class SilenceModel(nn.Module):
         self.head = RegressionHead(d_model, dropout=dropout)
         self.state_head = nn.Linear(d_model, 1)
 
+    def encode(self, batch):
+        """
+        Turn a batch into encoded region tokens (tokens + encoder).
+
+        Args:
+            batch: dict from SilenceDataset (batched by DataLoader)
+
+        Returns:
+            encoded: (B, 9, d_model)
+        """
+        tokens = self.tokens(batch["image"], batch["has_image"],
+                             batch["text"], batch["has_text"])
+        return self.encoder(tokens, batch["distance"], batch["touching"])
+
     def forward(self, batch):
         """
         Args:
@@ -49,16 +63,14 @@ class SilenceModel(nn.Module):
                 has_text (B, 9), distance (B, 9, 9), touching (B, 9, 9)
 
         Returns:
-            dict with vector (B, 9, 768) and abnormal_logit (B, 9)
+            dict with vector (B, 9, 768), abnormal_logit (B, 9) and encoded (B, 9, d_model)
         """
-        tokens = self.tokens(batch["image"], batch["has_image"],
-                             batch["text"], batch["has_text"])
-        encoded = self.encoder(tokens, batch["distance"], batch["touching"])
+        encoded = self.encode(batch)
         return {
             "vector": self.head(encoded),
             "abnormal_logit": self.state_head(encoded).squeeze(-1),
+            "encoded": encoded,
         }
-
 
 if __name__ == "__main__":
     # PYTHONPATH=src python -m silence_ct.models.model

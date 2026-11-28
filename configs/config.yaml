@@ -12,7 +12,7 @@ d_model: 256
 num_heads: 4
 num_layers: 3
 dropout: 0.1
-geometry: both          # none, dist, touch, both (ablation H2)
+geometry: none          # none, dist, touch, both (ablation H2: none chosen)
 head: regression        # regression; diffusion: TODO
 
 # training
@@ -22,3 +22,13 @@ weight_decay: 0.01
 epochs: 100
 patience: 10            # stop if validation AUC does not improve for 10 epochs
 seed: 42
+
+# diffusion head (stage 2, trained on top of a frozen stage-1 run)
+diffusion_width: 512    # hidden size of the denoising MLP
+diffusion_blocks: 3     # residual blocks in the MLP
+diffusion_steps: 1000   # noise steps in training
+sample_steps: 50        # denoising steps when sampling (DDIM)
+num_samples: 10         # samples per region at test time
+diffusion_lr: 0.0003
+diffusion_epochs: 300
+diffusion_patience: 20

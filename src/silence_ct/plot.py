@@ -118,6 +118,21 @@ def plot_training(run_dir):
     """
     log = pd.read_csv(Path(run_dir) / "log.csv")
     epochs = log["epoch"]
+
+    # diffusion runs: one panel with the noise-prediction loss
+    if "val_cosine" not in log.columns:
+        best_epoch = int(log.loc[log["val_loss"].idxmin(), "epoch"])
+        with plt.rc_context(STYLE):
+            fig, ax = plt.subplots(figsize=(5.5, 3.8))
+            draw_panel(ax, epochs, log["train_loss"], log["val_loss"], best_epoch,
+                       "Diffusion loss", "noise prediction MSE")
+            fig.suptitle(Path(run_dir).name, x=0.01, ha="left", color=MUTED_COLOR, fontsize=9)
+            fig.tight_layout()
+            out_path = Path(run_dir) / "training_curves.png"
+            fig.savefig(out_path, dpi=200, facecolor="white")
+            plt.close(fig)
+        return out_path
+
     if "val_auc_mean" in log.columns:
         best_epoch = int(log.loc[log["val_auc_mean"].idxmax(), "epoch"])
     else:

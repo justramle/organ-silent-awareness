@@ -10,12 +10,17 @@ so they are not scored. No random hiding, so results are the same every run.
 
     model:             state from the state head (per-region threshold), sentence from retrieval
     model (retrieval): state from the top-1 retrieved sentence
+    model (diffusion samples): diffusion runs only; P(abnormal) = share of the samples
+                       whose retrieved sentence is abnormal
     mean vector:       always predict the average train text vector of the region
     silence = normal:  always predict the most common NORMAL train sentence of the region
 
 For every method and region: cosine with the true vector, normal/abnormal accuracy,
 precision, recall, F1, ROC-AUC with a bootstrap 95% CI, plus a macro average over
 regions. Saves ROC curves (heart + esophagus, and all regions).
+For a diffusion run (folder with diffusion_head.pt), the stage-1 model named in its
+config is loaded; the text vector is the mean of the samples, and the examples file
+also has the sample spread (uncertainty: 0 = all samples agree).
 
 Run: PYTHONPATH=src python -m silence_ct.evaluate --run_dir <path to run folder>
 """
@@ -35,6 +40,7 @@ from sklearn.metrics import (accuracy_score, precision_recall_fscore_support,
                              roc_auc_score, roc_curve)
 
 from silence_ct.data.dataset import STATE_IDS, SilenceDataset
+from silence_ct.models.diffusion_head import DiffusionHead
 from silence_ct.models.model import SilenceModel
 from silence_ct.models.retrieval import SentenceBank, normalize
 from silence_ct.plot import MUTED_COLOR, STYLE, TRAIN_COLOR
@@ -130,20 +136,27 @@ def make_batch(dataset, samples):
     }
 
 
-def leave_one_out_predictions(model, dataset, device, batch_size=256):
+def leave_one_out_predictions(model, dataset, device, batch_size=256, head=None,
+                              num_samples=10, sample_steps=50, generator=None):
     """
     Predict every written region of every scan with only that region hidden.
+
+      - head given (diffusion run) -> also draw num_samples text vectors per region
 
     Args:
         model: SilenceModel in evaluation mode
         dataset: SilenceDataset of the test split
         device: "cuda" or "cpu"
         batch_size: samples per batch
+        head: DiffusionHead, or None
+        num_samples: diffusion samples per region
+        sample_steps: denoising steps per sample
+        generator: random generator for the diffusion start noise
 
     Returns:
         dict of numpy arrays, one row per (scan, written region):
         scans (M,), region (M,) index 0..8, predicted (M, 768), abnormal_prob (M,),
-        true_vector (M, 768), true_state (M,)
+        true_vector (M, 768), true_state (M,), and samples (M, num_samples, 768) if head
     """
     samples = []
     for scan in dataset.scans:
@@ -153,7 +166,7 @@ def leave_one_out_predictions(model, dataset, device, batch_size=256):
                 samples.append((scan, k))
 
     outputs = {"scans": [], "region": [], "predicted": [], "abnormal_prob": [],
-               "true_vector": [], "true_state": []}
+               "true_vector": [], "true_state": [], "samples": []}
     with torch.no_grad():
         for start in range(0, len(samples), batch_size):
             batch = make_batch(dataset, samples[start:start + batch_size])
@@ -172,10 +185,38 @@ def leave_one_out_predictions(model, dataset, device, batch_size=256):
             outputs["true_vector"].append(batch["true_vector"].numpy())
             outputs["true_state"].append(batch["true_state"].numpy())
 
+            if head is not None:
+                condition = result["encoded"][index, region]
+                drawn = head.sample(condition, num_samples, sample_steps, generator)
+                outputs["samples"].append(drawn.cpu().numpy())
+
     arrays = {"scans": np.array(outputs["scans"])}
-    for key in ["region", "predicted", "abnormal_prob", "true_vector", "true_state"]:
+    keys = ["region", "predicted", "abnormal_prob", "true_vector", "true_state"]
+    if head is not None:
+        keys.append("samples")
+    for key in keys:
         arrays[key] = np.concatenate(outputs[key])
     return arrays
+
+
+def sample_spread(samples):
+    """
+    How much the diffusion samples of one region disagree (uncertainty).
+
+      - all samples point the same way -> 0
+      - samples unrelated to each other -> close to 1
+
+    Args:
+        samples: (N, K, 768) samples, K per region
+
+    Returns:
+        spread: (N,) 1 - mean cosine between different samples of the same region
+    """
+    normalized = samples / np.linalg.norm(samples, axis=2, keepdims=True)
+    gram = np.einsum("nkd,njd->nkj", normalized, normalized)
+    num_samples = samples.shape[1]
+    mean_cosine = (gram.sum(axis=(1, 2)) - num_samples) / (num_samples * (num_samples - 1))
+    return 1 - mean_cosine
 
 
 def baseline_vectors(bank, region):
@@ -394,18 +435,45 @@ def main():
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, config, has_state_head = load_model(args.run_dir, device)
-    root = args.root or config["data_root"]
     run_dir = Path(args.run_dir)
+
+    # diffusion run: its config names the frozen stage-1 run
+    head = None
+    diffusion_config = None
+    base_dir = run_dir
+    if (run_dir / "diffusion_head.pt").exists():
+        with open(run_dir / "config.yaml") as f:
+            diffusion_config = yaml.safe_load(f)
+        base_dir = Path(diffusion_config["base_run"])
+
+    model, config, has_state_head = load_model(base_dir, device)
+    root = args.root or config["data_root"]
+
+    if diffusion_config is not None:
+        head = DiffusionHead(config["d_model"], width=diffusion_config["diffusion_width"],
+                             num_blocks=diffusion_config["diffusion_blocks"],
+                             num_steps=diffusion_config["diffusion_steps"])
+        head.load_state_dict(torch.load(run_dir / "diffusion_head.pt", map_location=device))
+        head.to(device).eval()
 
     # per-region thresholds chosen on validation by train.py (0.5 if missing)
     thresholds = {}
-    if (run_dir / "thresholds.json").exists():
-        with open(run_dir / "thresholds.json") as f:
+    if (base_dir / "thresholds.json").exists():
+        with open(base_dir / "thresholds.json") as f:
             thresholds = json.load(f)
 
     dataset = SilenceDataset(root, args.split, config["hide_prob"], config["seed"])
-    outputs = leave_one_out_predictions(model, dataset, device)
+    if head is None:
+        outputs = leave_one_out_predictions(model, dataset, device)
+    else:
+        generator = torch.Generator(device=device).manual_seed(0)
+        outputs = leave_one_out_predictions(model, dataset, device, head=head,
+                                            num_samples=diffusion_config["num_samples"],
+                                            sample_steps=diffusion_config["sample_steps"],
+                                            generator=generator)
+        # text vector of a diffusion run = mean of its samples
+        outputs["predicted"] = normalize(outputs["samples"].mean(axis=1))
+
     bank = SentenceBank(root, args.bank_split)
     print(f"{args.split}: {len(dataset)} scans, {len(outputs['scans'])} written regions "
           f"scored (leave-one-region-out), bank: {args.bank_split}")
@@ -439,10 +507,29 @@ def main():
         results.append(score_method("model (retrieval)", region, model_vectors, true_vectors,
                                     true_states, states, share))
 
-        for scan, state, prob, text in zip(outputs["scans"][rows], true_states,
-                                           model_prob, retrieved):
-            examples.append({"scan": scan, "region": region, "true_state": state,
-                             "abnormal_prob": prob, "retrieved": text})
+        # model (diffusion samples): each sample -> top-1 sentence -> share of abnormal
+        spread = None
+        if head is not None:
+            samples = outputs["samples"][rows]
+            num_samples = samples.shape[1]
+            _, sample_states, _ = bank.retrieve(samples.reshape(-1, samples.shape[2]),
+                                                region, top_k=1)
+            sample_abnormal = []
+            for row in sample_states:
+                sample_abnormal.append(row[0] == "ABNORMAL")
+            sample_share = np.array(sample_abnormal).reshape(-1, num_samples).mean(axis=1)
+            results.append(score_method("model (diffusion samples)", region, model_vectors,
+                                        true_vectors, true_states,
+                                        (sample_share >= 0.5).astype(int), sample_share))
+            spread = sample_spread(samples)
+
+        for i, (scan, state, prob, text) in enumerate(zip(outputs["scans"][rows], true_states,
+                                                          model_prob, retrieved)):
+            example = {"scan": scan, "region": region, "true_state": state,
+                       "abnormal_prob": prob, "retrieved": text}
+            if spread is not None:
+                example["sample_spread"] = spread[i]
+            examples.append(example)
 
         # baselines: the same vector for every scan
         for name, vector in baseline_vectors(bank, region).items():
@@ -454,7 +541,8 @@ def main():
     results = pd.DataFrame(results)
     results = pd.concat([results, macro_average(results)], ignore_index=True)
     results.to_csv(run_dir / f"eval_{args.split}.csv", index=False)
-    pd.DataFrame(examples).to_csv(run_dir / f"examples_{args.split}.csv", index=False)
+    examples = pd.DataFrame(examples)
+    examples.to_csv(run_dir / f"examples_{args.split}.csv", index=False)
 
     pd.set_option("display.width", 220)
     for region in ["heart", "esophagus", "macro average"]:
@@ -467,6 +555,13 @@ def main():
     model_rows = results[results["method"] == main_method]
     print(model_rows[["region", "n", "n_abnormal", "f1", "roc_auc", "auc_low", "auc_high"]]
           .round(3).to_string(index=False))
+
+    if head is not None:
+        # uncertainty: is the model less sure about abnormal regions?
+        print("\nmean sample spread (uncertainty) by true state, heart and esophagus")
+        main_examples = examples[examples["region"].isin(["heart", "esophagus"])]
+        print(main_examples.groupby(["region", "true_state"])["sample_spread"]
+              .mean().round(4).to_string())
 
     # ROC figures: main organs (paper) and all regions (appendix)
     main_regions = {}
