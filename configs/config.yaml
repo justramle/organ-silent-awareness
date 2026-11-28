@@ -20,5 +20,5 @@ batch_size: 64
 lr: 0.0003
 weight_decay: 0.01
 epochs: 100
-patience: 20            # stop if validation AUC does not improve for 20 epochs
+patience: 10            # stop if validation AUC does not improve for 10 epochs
 seed: 42

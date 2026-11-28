@@ -3,6 +3,7 @@ Training curves
 
 Plots loss and cosine similarity per epoch for train and validation, from the
 log.csv that train.py writes in each run folder, and saves the figure there.
+Lines are smoothed with a moving average; the raw values are drawn faintly behind.
 
 Run: PYTHONPATH=src python -m silence_ct.plot --run_dir <path to run folder>
 """
@@ -14,18 +15,14 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # colours checked for colour-blind readers; text stays grey, not the line colour
-TRAIN_COLOR = "#257de0" 
+TRAIN_COLOR = "#257de0"
 VAL_COLOR = "#f2a600"
 TEXT_COLOR = "#191919"
 MUTED_COLOR = "#666666"
 GRID_COLOR = "#e6e6e6"
 
-# validation AUC lines (one per region type)
-AUC_LINES = [
-    ("val_auc_heart", "heart", "#6a4ce2", "-"),
-    ("val_auc_esophagus", "esophagus", "#00b894", "-"),
-    ("val_auc_mean", "mean (all regions)", TEXT_COLOR, "--"),
-]
+# epochs in the moving average that smooths the curves
+SMOOTH_WINDOW = 5
 
 STYLE = {
     "font.size": 10,
@@ -48,11 +45,28 @@ STYLE = {
 }
 
 
+def smooth(values, window=SMOOTH_WINDOW):
+    """
+    Moving average over the last `window` epochs, so noisy curves are easier to read.
+
+      - first epochs (fewer than window) -> average of the epochs so far
+
+    Args:
+        values: metric per epoch (pandas Series)
+        window: number of epochs to average
+
+    Returns:
+        smoothed values, same length
+    """
+    return values.rolling(window, min_periods=1).mean()
+
+
 def draw_panel(ax, epochs, train_values, val_values, best_epoch, title, ylabel):
     """
     Draw one panel with a train line, a validation line and the best epoch.
 
-      - the best epoch (saved model) is a dot on the validation line with its value
+      - smoothed lines on top, raw values faint behind them
+      - the best epoch (saved model) is a dot on the raw validation value
 
     Args:
         ax: matplotlib axis
@@ -63,8 +77,13 @@ def draw_panel(ax, epochs, train_values, val_values, best_epoch, title, ylabel):
         title: panel title
         ylabel: y-axis label
     """
-    ax.plot(epochs, train_values, color=TRAIN_COLOR, label="train")
-    ax.plot(epochs, val_values, color=VAL_COLOR, label="validation")
+    # raw values, faint
+    ax.plot(epochs, train_values, color=TRAIN_COLOR, linewidth=1, alpha=0.25)
+    ax.plot(epochs, val_values, color=VAL_COLOR, linewidth=1, alpha=0.25)
+
+    # smoothed values
+    ax.plot(epochs, smooth(train_values), color=TRAIN_COLOR, label="train")
+    ax.plot(epochs, smooth(val_values), color=VAL_COLOR, label="validation")
 
     # best epoch: dot with a white ring, value written beside it
     best_value = val_values[epochs == best_epoch].iloc[0]
@@ -81,44 +100,15 @@ def draw_panel(ax, epochs, train_values, val_values, best_epoch, title, ylabel):
     ax.margins(x=0.02)
 
 
-def draw_auc(ax, log, best_epoch):
-    """
-    Draw validation ROC-AUC per epoch for heart, esophagus and the mean of all regions.
-
-      - the best epoch (highest mean AUC, the saved model) is a dot on the mean line
-
-    Args:
-        ax: matplotlib axis
-        log: training log table
-        best_epoch: epoch saved by train.py
-    """
-    for column, label, color, style in AUC_LINES:
-        ax.plot(log["epoch"], log[column], color=color, linestyle=style, label=label)
-
-    best_value = log.loc[log["epoch"] == best_epoch, "val_auc_mean"].iloc[0]
-    ax.scatter([best_epoch], [best_value], s=60, color=TEXT_COLOR,
-               edgecolor="white", linewidth=2, zorder=3)
-    ax.annotate(f"best {best_value:.3f}", (best_epoch, best_value),
-                xytext=(0, 12), textcoords="offset points", ha="center",
-                fontsize=9, color=TEXT_COLOR)
-
-    ax.set_title("Validation ROC-AUC")
-    ax.set_xlabel("epoch")
-    ax.set_ylabel("ROC-AUC (0.5 = guessing)")
-    ax.legend(loc="best")
-    ax.margins(x=0.02)
-
-
 def plot_training(run_dir):
     """
     Draw training curves for one run and save them as training_curves.png.
 
-    Three panels:
-      - state loss: train and validation, lower is better
-      - validation ROC-AUC: heart, esophagus and mean, higher is better
+    Two panels:
+      - loss:   train and validation total loss (vector + state), lower is better
       - cosine: train and validation, higher is better (1 = perfect)
     Train numbers use dropout, so they are not exactly comparable to validation.
-    Needs a log with AUC columns (runs trained after the AUC change).
+    The dot marks the saved epoch (highest mean validation AUC, if logged).
 
     Args:
         run_dir: run folder with log.csv
@@ -128,14 +118,16 @@ def plot_training(run_dir):
     """
     log = pd.read_csv(Path(run_dir) / "log.csv")
     epochs = log["epoch"]
-    best_epoch = int(log.loc[log["val_auc_mean"].idxmax(), "epoch"])
+    if "val_auc_mean" in log.columns:
+        best_epoch = int(log.loc[log["val_auc_mean"].idxmax(), "epoch"])
+    else:
+        best_epoch = int(log.loc[log["val_loss"].idxmin(), "epoch"])
 
     with plt.rc_context(STYLE):
-        fig, (loss_ax, auc_ax, cosine_ax) = plt.subplots(1, 3, figsize=(15, 3.8))
+        fig, (loss_ax, cosine_ax) = plt.subplots(1, 2, figsize=(10, 3.8))
 
-        draw_panel(loss_ax, epochs, log["train_state_loss"], log["val_state_loss"], best_epoch,
-                   "State loss", "cross-entropy")
-        draw_auc(auc_ax, log, best_epoch)
+        draw_panel(loss_ax, epochs, log["train_loss"], log["val_loss"], best_epoch,
+                   "Loss", "vector + state loss")
         draw_panel(cosine_ax, epochs, 1 - log["train_vector_loss"], log["val_cosine"], best_epoch,
                    "Cosine similarity", "cosine")
 
