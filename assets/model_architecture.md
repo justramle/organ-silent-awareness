@@ -1,5 +1,8 @@
 # Model architecture
 
+Final model: geometry = none (the geometry ablation showed no gain), state head + diffusion head.
+The geometry bias is kept as an option and drawn below for completeness.
+
 Shapes shown for a batch of 64 scans (9 regions each).
 
 ```
@@ -49,17 +52,20 @@ Shapes shown for a batch of 64 scans (9 regions each).
                       │ encoded (64, 9, 256)
                       │ each token now knows about its neighbours
                       ▼
-┌──────────────────────────────────────┐
-│ 3. HEAD  (diffusion_head.py)         │
-│  RegressionHead: 256 → 256 → 768     │
-│  (same small MLP for each region)    │
-└──────────────────┬───────────────────┘
-                   │ predicted (64, 9, 768)
+┌──────────────────────────────────────────────────────────────────┐
+│ 3. HEADS                                                         │
+│  state head (model.py):         256 → 1    P(abnormal)           │
+│  RegressionHead (stage 1):      256 → 256 → 768   one vector     │
+│  DiffusionHead (stage 2):       small MLP denoiser, predicts the │
+│                                 clean vector; 10 samples/region  │
+└──────────────────┬───────────────────────────────────────────────┘
+                   │ P(abnormal) (64, 9) + text vector(s) (64, 9, 768)
                    ▼
      ┌─────────────┴──────────────┐
      │ TRAINING                   │ TEST
      ▼                            ▼
- loss = 1 - cosine(pred, target)  retrieval.py: closest real
- ONLY where is_hidden             sentence in the train bank
- → update all weights             → output text
+ stage 1: (1 − cosine) +          state head → P(abnormal)
+   binary cross-entropy           vector(s) → retrieval.py: closest real
+ stage 2: clean-vector MSE          sentence in the train bank
+ ONLY where is_hidden             diffusion: spread of samples = uncertainty
 ```

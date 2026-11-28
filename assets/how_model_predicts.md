@@ -40,3 +40,12 @@ Later: pool our own image vector inside the RadGenome mask (option B) and compar
 To check if a prediction is right we need the true answer, so we test on **written** regions:
 hide the sentence, predict it, compare. Heart and esophagus have many written examples (abnormal and normal),
 so their scores are the most reliable. The model still fills all silent regions.
+
+---
+
+## Update (Nov 27): geometry in the final model
+
+The geometry ablation (3 seeds) showed that distance / touching give **no reliable gain** at the 9-region level,
+so the final model uses **geometry = none**: the region embedding already tells the model which organs are
+neighbours, because the layout is almost the same in every patient. Step 3 above is kept as an option.
+The current full pipeline (state head + diffusion head) is in `full_pipeline.md`.
